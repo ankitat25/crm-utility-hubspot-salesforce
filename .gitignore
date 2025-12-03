@@ -1,0 +1,13 @@
+# Visual Studio
+.vs/
+
+# Build output
+bin/
+obj/
+CrmUtility.Backend/bin/
+CrmUtility.Backend/obj/
+
+# Don't upload secrets
+CrmUtility.Backend/appsettings.Development.json
+CrmUtility.Backend/appsettings.Local.json
+**/*.user

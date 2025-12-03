@@ -1,0 +1,6 @@
+@CrmUtility.Backend_HostAddress = http://localhost:5159
+
+GET {{CrmUtility.Backend_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
