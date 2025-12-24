@@ -6,12 +6,34 @@ using System.Threading.Tasks;
 using CrmUtility.Backend.Models;
 using CrmUtility.Backend.Options;
 using Microsoft.Extensions.Options;
+using System.Net.Http.Headers;
 
 namespace CrmUtility.Backend.Services
 {
-    // ===========================
-    // 🔹 SALESFORCE MODELS
-    // ===========================
+    public class SalesforceQueryResult<T>
+    {
+        public List<T> records { get; set; }
+    }
+
+    public class SalesforceUser
+    {
+        public string Name { get; set; }
+    }
+
+    public class SalesforceAccount
+    {
+        public string Name { get; set; }
+    }
+
+    public class SalesforceContactRecord
+    {
+        public string Id { get; set; }
+        public string FirstName { get; set; }
+        public string LastName { get; set; }
+        public string Email { get; set; }
+        public SalesforceAccount Account { get; set; }
+        public SalesforceUser Owner { get; set; }
+    }
 
     public class SalesforceAccountRecord
     {
@@ -21,37 +43,14 @@ namespace CrmUtility.Backend.Services
         public SalesforceUser Owner { get; set; }
     }
 
-    public class SalesforceQueryResult<T>
-    {
-        public List<T> records { get; set; }
-        public int totalSize { get; set; }
-        public bool done { get; set; }
-    }
-
-    public class SalesforceContactRecord
+    public class SalesforceOpportunityRecord
     {
         public string Id { get; set; }
-        public string FirstName { get; set; }
-        public string LastName { get; set; }
-        public string Email { get; set; }
-
-        public SalesforceAccount Account { get; set; }
+        public string Name { get; set; }
+        public string StageName { get; set; }
+        public decimal? Amount { get; set; }
         public SalesforceUser Owner { get; set; }
     }
-
-    public class SalesforceAccount
-    {
-        public string Name { get; set; }
-    }
-
-    public class SalesforceUser
-    {
-        public string Name { get; set; }
-    }
-
-    // ===========================
-    // 🔹 SALESFORCE CRM SERVICE
-    // ===========================
 
     public class SalesforceCrmService
     {
@@ -69,191 +68,298 @@ namespace CrmUtility.Backend.Services
             _options = options.Value;
         }
 
-        // ===========================
-        // ✅ GET CONTACTS
-        // ===========================
-
-        public async Task<List<StandardContactDto>> GetContactsAsync(string userId)
+        private async Task<(string accessToken, string instanceUrl)> Resolve(string userId)
         {
-            var connection = await _tokenService.GetConnectionAsync(userId, CrmType.Salesforce);
-            if (connection == null)
-                throw new InvalidOperationException("No Salesforce connection found for user " + userId);
-
-            string soql =
-                "SELECT Id, FirstName, LastName, Email, Account.Name, Owner.Name " +
-                "FROM Contact LIMIT 10";
-
-            var requestUrl =
-                $"{connection.InstanceUrl}/services/data/{_options.ApiVersion}/query" +
-                $"?q={Uri.EscapeDataString(soql)}";
-
-            var request = new HttpRequestMessage(HttpMethod.Get, requestUrl);
-            request.Headers.Authorization =
-                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", connection.AccessToken);
-
-            var response = await _client.SendAsync(request);
-            response.EnsureSuccessStatusCode();
-
-            var data =
-                await response.Content.ReadFromJsonAsync<SalesforceQueryResult<SalesforceContactRecord>>();
-
-            var result = new List<StandardContactDto>();
-
-            if (data?.records != null)
-            {
-                foreach (var r in data.records)
-                {
-                    result.Add(new StandardContactDto
-                    {
-                        Crm = "salesforce",
-                        Type = "contact",
-                        Id = r.Id,
-                        FirstName = r.FirstName,
-                        LastName = r.LastName,
-                        Email = r.Email,
-                        Company = r.Account?.Name,
-                        Owner = r.Owner?.Name
-                    });
-                }
-            }
-
-            return result;
+            var conn = await _tokenService.GetConnectionAsync(userId, CrmType.Salesforce);
+            if (conn == null) throw new Exception("Salesforce not connected");
+            return (conn.AccessToken, conn.InstanceUrl);
         }
 
-        // ===========================
-        // ✅ CREATE CONTACT
-        // ===========================
-
-        public async Task<string> CreateContactAsync(StandardContactDto contact, string userId)
+       
+        public async Task<List<StandardContactDto>> GetContactsAsync(string userId)
         {
-            if (contact == null)
-                throw new ArgumentNullException(nameof(contact));
+            var (token, urlBase) = await Resolve(userId);
 
-            var connection = await _tokenService.GetConnectionAsync(userId, CrmType.Salesforce);
-            if (connection == null)
-                throw new InvalidOperationException("No Salesforce connection found for user " + userId);
+            string soql =
+                "SELECT Id, FirstName, LastName, Email, Account.Name, Owner.Name FROM Contact LIMIT 10";
 
-            var url =
-                $"{connection.InstanceUrl}/services/data/{_options.ApiVersion}/sobjects/Contact";
+            var req = new HttpRequestMessage(HttpMethod.Get,
+                $"{urlBase}/services/data/{_options.ApiVersion}/query?q={Uri.EscapeDataString(soql)}");
+
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+            var res = await _client.SendAsync(req);
+            res.EnsureSuccessStatusCode();
+
+            var data =
+                await res.Content.ReadFromJsonAsync<SalesforceQueryResult<SalesforceContactRecord>>();
+
+            var list = new List<StandardContactDto>();
+
+            foreach (var r in data.records)
+            {
+                list.Add(new StandardContactDto
+                {
+                    Crm = "salesforce",
+                    Type = "contact",
+                    Id = r.Id,
+                    FirstName = r.FirstName,
+                    LastName = r.LastName,
+                    Email = r.Email,
+                    Company = r.Account?.Name,
+                    Owner = r.Owner?.Name
+                });
+            }
+
+            return list;
+        }
+
+        public async Task<string> CreateContactAsync(StandardContactDto dto, string userId)
+        {
+            var (token, urlBase) = await Resolve(userId);
 
             var payload = new Dictionary<string, object?>
             {
-                ["FirstName"] = contact.FirstName,
-                ["LastName"] = contact.LastName,
-                ["Email"] = contact.Email
+                ["FirstName"] = dto.FirstName,
+                ["LastName"] = string.IsNullOrWhiteSpace(dto.LastName) ? "Unknown" : dto.LastName,
+                ["Email"] = dto.Email
             };
 
-            var request = new HttpRequestMessage(HttpMethod.Post, url)
+            var req = new HttpRequestMessage(HttpMethod.Post,
+                $"{urlBase}/services/data/{_options.ApiVersion}/sobjects/Contact")
             {
                 Content = JsonContent.Create(payload)
             };
 
-            request.Headers.Authorization =
-                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", connection.AccessToken);
+            req.Headers.Authorization =
+                new AuthenticationHeaderValue("Bearer", token);
 
-            var response = await _client.SendAsync(request);
-            response.EnsureSuccessStatusCode();
+            var res = await _client.SendAsync(req);
+            res.EnsureSuccessStatusCode();
 
-            var result = await response.Content.ReadFromJsonAsync<Dictionary<string, object>>();
-
-            return result != null && result.TryGetValue("id", out var idObj)
-                ? idObj?.ToString()
-                : null;
+            var result = await res.Content.ReadFromJsonAsync<Dictionary<string, object>>();
+            return result?["id"]?.ToString();
         }
 
-        // ===========================
-        // ✅ GET COMPANIES (ACCOUNTS)
-        // ===========================
+        public async Task<string> UpdateContactAsync(StandardContactDto dto, string userId)
+        {
+            if (string.IsNullOrWhiteSpace(dto.Id))
+                throw new Exception("Contact Id required");
+
+            var (token, urlBase) = await Resolve(userId);
+
+            var payload = new Dictionary<string, object?>();
+
+            if (!string.IsNullOrWhiteSpace(dto.FirstName))
+                payload["FirstName"] = dto.FirstName;
+
+            if (!string.IsNullOrWhiteSpace(dto.LastName))
+                payload["LastName"] = dto.LastName;
+
+            if (!string.IsNullOrWhiteSpace(dto.Email))
+                payload["Email"] = dto.Email;
+
+            var req = new HttpRequestMessage(HttpMethod.Patch,
+                $"{urlBase}/services/data/{_options.ApiVersion}/sobjects/Contact/{dto.Id}")
+            {
+                Content = JsonContent.Create(payload)
+            };
+
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+            var res = await _client.SendAsync(req);
+            res.EnsureSuccessStatusCode();
+
+            return dto.Id;
+        }
 
         public async Task<List<StandardCompanyDto>> GetCompaniesAsync(string userId)
         {
-            var connection = await _tokenService.GetConnectionAsync(userId, CrmType.Salesforce);
-            if (connection == null)
-                throw new InvalidOperationException("No Salesforce connection found for user " + userId);
+            var (token, urlBase) = await Resolve(userId);
 
             string soql =
                 "SELECT Id, Name, Website, Owner.Name FROM Account LIMIT 10";
 
-            var requestUrl =
-                $"{connection.InstanceUrl}/services/data/{_options.ApiVersion}/query" +
-                $"?q={Uri.EscapeDataString(soql)}";
+            var req = new HttpRequestMessage(HttpMethod.Get,
+                $"{urlBase}/services/data/{_options.ApiVersion}/query?q={Uri.EscapeDataString(soql)}");
 
-            var request = new HttpRequestMessage(HttpMethod.Get, requestUrl);
-            request.Headers.Authorization =
-                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", connection.AccessToken);
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
-            var response = await _client.SendAsync(request);
-            response.EnsureSuccessStatusCode();
+            var res = await _client.SendAsync(req);
+            res.EnsureSuccessStatusCode();
 
             var data =
-                await response.Content.ReadFromJsonAsync<SalesforceQueryResult<SalesforceAccountRecord>>();
+                await res.Content.ReadFromJsonAsync<SalesforceQueryResult<SalesforceAccountRecord>>();
 
-            var result = new List<StandardCompanyDto>();
+            var list = new List<StandardCompanyDto>();
 
-            if (data?.records != null)
+            foreach (var r in data.records)
             {
-                foreach (var r in data.records)
+                list.Add(new StandardCompanyDto
                 {
-                    result.Add(new StandardCompanyDto
-                    {
-                        Crm = "salesforce",
-                        Type = "company",
-                        Id = r.Id,
-                        Name = r.Name,
-                        Domain = r.Website,
-                        Owner = r.Owner?.Name
-                    });
-                }
+                    Crm = "salesforce",
+                    Type = "company",
+                    Id = r.Id,
+                    Name = r.Name,
+                    Domain = r.Website,
+                    Owner = r.Owner?.Name
+                });
             }
 
-            return result;
+            return list;
         }
 
-        // ===========================
-        // ✅ UPDATE CONTACT
-        // ===========================
-
-        public async Task<string> UpdateContactAsync(StandardContactDto contact, string userId)
+        public async Task<string> CreateCompanyAsync(StandardCompanyDto dto, string userId)
         {
-            if (contact == null)
-                throw new ArgumentNullException(nameof(contact));
+            var (token, urlBase) = await Resolve(userId);
 
-            if (string.IsNullOrWhiteSpace(contact.Id))
-                throw new InvalidOperationException("Contact Id is required.");
+            var payload = new Dictionary<string, object?>
+            {
+                ["Name"] = dto.Name,
+                ["Website"] = dto.Domain
+            };
 
-            var connection = await _tokenService.GetConnectionAsync(userId, CrmType.Salesforce);
-            if (connection == null)
-                throw new InvalidOperationException("No Salesforce connection found for user " + userId);
-
-            var url =
-                $"{connection.InstanceUrl}/services/data/{_options.ApiVersion}/sobjects/Contact/{contact.Id}";
-
-            var payload = new Dictionary<string, object?>();
-
-            if (!string.IsNullOrWhiteSpace(contact.FirstName))
-                payload["FirstName"] = contact.FirstName;
-
-            if (!string.IsNullOrWhiteSpace(contact.LastName))
-                payload["LastName"] = contact.LastName;
-
-            if (!string.IsNullOrWhiteSpace(contact.Email))
-                payload["Email"] = contact.Email;
-
-            if (payload.Count == 0)
-                throw new InvalidOperationException("No fields to update.");
-
-            var request = new HttpRequestMessage(new HttpMethod("PATCH"), url)
+            var req = new HttpRequestMessage(HttpMethod.Post,
+                $"{urlBase}/services/data/{_options.ApiVersion}/sobjects/Account")
             {
                 Content = JsonContent.Create(payload)
             };
 
-            request.Headers.Authorization =
-                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", connection.AccessToken);
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
-            var response = await _client.SendAsync(request);
-            response.EnsureSuccessStatusCode();
+            var res = await _client.SendAsync(req);
+            res.EnsureSuccessStatusCode();
 
-            return contact.Id;
+            var result = await res.Content.ReadFromJsonAsync<Dictionary<string, object>>();
+            return result?["id"]?.ToString();
+        }
+
+        public async Task<string> UpdateCompanyAsync(StandardCompanyDto dto, string userId)
+        {
+            if (string.IsNullOrWhiteSpace(dto.Id))
+                throw new Exception("Company Id required");
+
+            var (token, urlBase) = await Resolve(userId);
+
+            var payload = new Dictionary<string, object?>();
+
+            if (!string.IsNullOrWhiteSpace(dto.Name))
+                payload["Name"] = dto.Name;
+
+            if (!string.IsNullOrWhiteSpace(dto.Domain))
+                payload["Website"] = dto.Domain;
+
+            var req = new HttpRequestMessage(HttpMethod.Patch,
+                $"{urlBase}/services/data/{_options.ApiVersion}/sobjects/Account/{dto.Id}")
+            {
+                Content = JsonContent.Create(payload)
+            };
+
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+            var res = await _client.SendAsync(req);
+            res.EnsureSuccessStatusCode();
+
+            return dto.Id;
+        }
+
+        
+        public async Task<List<StandardDealDto>> GetDealsAsync(string userId)
+        {
+            var (token, urlBase) = await Resolve(userId);
+
+            string soql =
+                "SELECT Id, Name, StageName, Amount, Owner.Name FROM Opportunity LIMIT 10";
+
+            var req = new HttpRequestMessage(HttpMethod.Get,
+                $"{urlBase}/services/data/{_options.ApiVersion}/query?q={Uri.EscapeDataString(soql)}");
+
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+            var res = await _client.SendAsync(req);
+            res.EnsureSuccessStatusCode();
+
+            var data =
+                await res.Content.ReadFromJsonAsync<SalesforceQueryResult<SalesforceOpportunityRecord>>();
+
+            var list = new List<StandardDealDto>();
+
+            foreach (var r in data.records)
+            {
+                list.Add(new StandardDealDto
+                {
+                    Crm = "salesforce",
+                    Type = "deal",
+                    Id = r.Id,
+                    DealName = r.Name,
+                    Stage = r.StageName,
+                    Amount = r.Amount,
+                    Owner = r.Owner?.Name
+                });
+            }
+
+            return list;
+        }
+
+        public async Task<string> CreateDealAsync(StandardDealDto dto, string userId)
+        {
+            var (token, urlBase) = await Resolve(userId);
+
+            var payload = new Dictionary<string, object?>
+            {
+                ["Name"] = dto.DealName,
+                ["StageName"] = string.IsNullOrWhiteSpace(dto.Stage) ? "Prospecting" : dto.Stage,
+                ["CloseDate"] = DateTime.UtcNow.AddDays(30).ToString("yyyy-MM-dd")
+            };
+
+            if (dto.Amount.HasValue)
+                payload["Amount"] = dto.Amount.Value;
+
+            var req = new HttpRequestMessage(HttpMethod.Post,
+                $"{urlBase}/services/data/{_options.ApiVersion}/sobjects/Opportunity")
+            {
+                Content = JsonContent.Create(payload)
+            };
+
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+            var res = await _client.SendAsync(req);
+            res.EnsureSuccessStatusCode();
+
+            var result = await res.Content.ReadFromJsonAsync<Dictionary<string, object>>();
+            return result?["id"]?.ToString();
+        }
+
+        public async Task<string> UpdateDealAsync(StandardDealDto dto, string userId)
+        {
+            if (string.IsNullOrWhiteSpace(dto.Id))
+                throw new Exception("Deal Id required");
+
+            var (token, urlBase) = await Resolve(userId);
+
+            var payload = new Dictionary<string, object?>();
+
+            if (!string.IsNullOrWhiteSpace(dto.DealName))
+                payload["Name"] = dto.DealName;
+
+            if (!string.IsNullOrWhiteSpace(dto.Stage))
+                payload["StageName"] = dto.Stage;
+
+            if (dto.Amount.HasValue)
+                payload["Amount"] = dto.Amount.Value;
+
+            var req = new HttpRequestMessage(HttpMethod.Patch,
+                $"{urlBase}/services/data/{_options.ApiVersion}/sobjects/Opportunity/{dto.Id}")
+            {
+                Content = JsonContent.Create(payload)
+            };
+
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+            var res = await _client.SendAsync(req);
+            res.EnsureSuccessStatusCode();
+
+            return dto.Id;
         }
     }
 }

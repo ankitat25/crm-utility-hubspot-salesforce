@@ -22,278 +22,327 @@ namespace CrmUtility.Backend.Services
             _db = db;
         }
 
-      
-        public async Task<string> CreateContactAsync(StandardContactDto contact, string userId)
+        private async Task<string> GetToken(string userId)
         {
-            if (contact == null)
-                throw new ArgumentNullException(nameof(contact));
-
-            var connection = await _db.OAuthConnections
+            var conn = await _db.OAuthConnections
                 .FirstOrDefaultAsync(x => x.UserId == userId && x.Crm == CrmType.HubSpot);
 
-            if (connection == null)
-                throw new InvalidOperationException("No HubSpot connection found for user " + userId);
+            if (conn == null)
+                throw new InvalidOperationException("HubSpot not connected");
 
-            var url = "https://api.hubapi.com/crm/v3/objects/contacts";
-
-            var payload = new
-            {
-                properties = new Dictionary<string, object?>
-                {
-                    ["firstname"] = contact.FirstName,
-                    ["lastname"] = contact.LastName,
-                    ["email"] = contact.Email,
-                }
-            };
-
-            var request = new HttpRequestMessage(HttpMethod.Post, url)
-            {
-                Content = JsonContent.Create(payload)
-            };
-
-            request.Headers.Authorization =
-                new AuthenticationHeaderValue("Bearer", connection.AccessToken);
-
-            var response = await _client.SendAsync(request);
-            response.EnsureSuccessStatusCode();
-
-            var result = await response.Content.ReadFromJsonAsync<Dictionary<string, object>>();
-
-            return result != null && result.TryGetValue("id", out var idObj)
-                ? idObj?.ToString()
-                : null;
+            return conn.AccessToken;
         }
 
-        
+        // ---------------- CONTACTS ----------------
+
+        public async Task<string> CreateContactAsync(StandardContactDto contact, string userId)
+        {
+            var token = await GetToken(userId);
+
+            var req = new HttpRequestMessage(HttpMethod.Post,
+                "https://api.hubapi.com/crm/v3/objects/contacts")
+            {
+                Content = JsonContent.Create(new
+                {
+                    properties = new
+                    {
+                        firstname = contact.FirstName,
+                        lastname = contact.LastName,
+                        email = contact.Email
+                    }
+                })
+            };
+
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+            var res = await _client.SendAsync(req);
+            res.EnsureSuccessStatusCode();
+
+            var result = await res.Content.ReadFromJsonAsync<Dictionary<string, object>>();
+            return result?["id"]?.ToString();
+        }
+
+        public async Task<string> UpdateContactAsync(StandardContactDto contact, string userId)
+        {
+            var token = await GetToken(userId);
+
+            var props = new Dictionary<string, object?>
+            {
+                ["firstname"] = contact.FirstName,
+                ["lastname"] = contact.LastName,
+                ["email"] = contact.Email
+            };
+
+            var req = new HttpRequestMessage(
+                HttpMethod.Patch,
+                $"https://api.hubapi.com/crm/v3/objects/contacts/{contact.Id}")
+            {
+                Content = JsonContent.Create(new { properties = props })
+            };
+
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+            var res = await _client.SendAsync(req);
+            res.EnsureSuccessStatusCode();
+
+            return contact.Id;
+        }
+
         public async Task<List<StandardContactDto>> GetContactsAsync(string userId)
         {
-            var connection = await _db.OAuthConnections
-                .FirstOrDefaultAsync(x => x.UserId == userId && x.Crm == CrmType.HubSpot);
+            var token = await GetToken(userId);
 
-            if (connection == null)
-                throw new Exception("HubSpot is not connected for this user.");
+            var req = new HttpRequestMessage(
+                HttpMethod.Post,
+                "https://api.hubapi.com/crm/v3/objects/contacts/search")
+            {
+                Content = JsonContent.Create(new
+                {
+                    limit = 10,
+                    sorts = new[]
+                    {
+                        new { propertyName = "createdAt", direction = "DESCENDING" }
+                    },
+                    properties = new[]
+                    {
+                        "firstname", "lastname", "email", "company"
+                    }
+                })
+            };
 
-            _client.DefaultRequestHeaders.Authorization =
-                new AuthenticationHeaderValue("Bearer", connection.AccessToken);
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
-            string url =
-                "https://api.hubapi.com/crm/v3/objects/contacts" +
-                "?limit=10" +
-                "&properties=firstname,lastname,email,company,hubspot_owner_id";
+            var res = await _client.SendAsync(req);
+            res.EnsureSuccessStatusCode();
 
-            var response = await _client.GetAsync(url);
-            response.EnsureSuccessStatusCode();
-
-            var json = await response.Content.ReadAsStringAsync();
-
+            var json = await res.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement.GetProperty("results");
 
             var list = new List<StandardContactDto>();
 
-            foreach (var item in root.EnumerateArray())
+            foreach (var item in doc.RootElement.GetProperty("results").EnumerateArray())
             {
-                var id = item.GetProperty("id").GetString();
                 var props = item.GetProperty("properties");
 
                 list.Add(new StandardContactDto
                 {
                     Crm = "hubspot",
                     Type = "contact",
-                    Id = id,
-                    FirstName = props.TryGetProperty("firstname", out var fn) ? fn.GetString() : "",
-                    LastName = props.TryGetProperty("lastname", out var ln) ? ln.GetString() : "",
-                    Email = props.TryGetProperty("email", out var em) ? em.GetString() : "",
-                    Company = props.TryGetProperty("company", out var cm) ? cm.GetString() : "",
-                    Owner = props.TryGetProperty("hubspot_owner_id", out var ow) ? ow.GetString() : ""
+                    Id = item.GetProperty("id").GetString(),
+                    FirstName = props.GetProperty("firstname").GetString(),
+                    LastName = props.GetProperty("lastname").GetString(),
+                    Email = props.GetProperty("email").GetString()
                 });
             }
 
             return list;
         }
 
-      
+        // ---------------- COMPANIES ----------------
+
+        public async Task<string> CreateCompanyAsync(StandardCompanyDto company, string userId)
+        {
+            var token = await GetToken(userId);
+
+            var req = new HttpRequestMessage(
+                HttpMethod.Post,
+                "https://api.hubapi.com/crm/v3/objects/companies")
+            {
+                Content = JsonContent.Create(new
+                {
+                    properties = new
+                    {
+                        name = company.Name,
+                        domain = company.Domain
+                    }
+                })
+            };
+
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+            var res = await _client.SendAsync(req);
+            res.EnsureSuccessStatusCode();
+
+            var result = await res.Content.ReadFromJsonAsync<Dictionary<string, object>>();
+            return result?["id"]?.ToString();
+        }
+
+        public async Task<string> UpdateCompanyAsync(StandardCompanyDto company, string userId)
+        {
+            var token = await GetToken(userId);
+
+            var req = new HttpRequestMessage(
+                HttpMethod.Patch,
+                $"https://api.hubapi.com/crm/v3/objects/companies/{company.Id}")
+            {
+                Content = JsonContent.Create(new
+                {
+                    properties = new
+                    {
+                        name = company.Name,
+                        domain = company.Domain
+                    }
+                })
+            };
+
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+            var res = await _client.SendAsync(req);
+            res.EnsureSuccessStatusCode();
+
+            return company.Id;
+        }
+
         public async Task<List<StandardCompanyDto>> GetCompaniesAsync(string userId)
         {
-            var connection = await _db.OAuthConnections
-                .FirstOrDefaultAsync(x => x.UserId == userId && x.Crm == CrmType.HubSpot);
+            var token = await GetToken(userId);
 
-            if (connection == null)
-                throw new Exception("HubSpot is not connected for this user.");
+            var req = new HttpRequestMessage(
+                HttpMethod.Post,
+                "https://api.hubapi.com/crm/v3/objects/companies/search")
+            {
+                Content = JsonContent.Create(new
+                {
+                    limit = 10,
+                    sorts = new[]
+                    {
+                        new { propertyName = "createdAt", direction = "DESCENDING" }
+                    },
+                    properties = new[] { "name", "domain" }
+                })
+            };
 
-            _client.DefaultRequestHeaders.Authorization =
-                new AuthenticationHeaderValue("Bearer", connection.AccessToken);
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
-            string url =
-                "https://api.hubapi.com/crm/v3/objects/companies" +
-                "?limit=10" +
-                "&properties=name,domain,hubspot_owner_id";
+            var res = await _client.SendAsync(req);
+            res.EnsureSuccessStatusCode();
 
-            var response = await _client.GetAsync(url);
-            response.EnsureSuccessStatusCode();
-
-            var json = await response.Content.ReadAsStringAsync();
-
+            var json = await res.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement.GetProperty("results");
 
             var list = new List<StandardCompanyDto>();
 
-            foreach (var item in root.EnumerateArray())
+            foreach (var item in doc.RootElement.GetProperty("results").EnumerateArray())
             {
-                var id = item.GetProperty("id").GetString();
                 var props = item.GetProperty("properties");
 
                 list.Add(new StandardCompanyDto
                 {
                     Crm = "hubspot",
-                    Id = id,
-                    Name = props.TryGetProperty("name", out var name) ? name.GetString() : "",
-                    Domain = props.TryGetProperty("domain", out var domain) ? domain.GetString() : "",
-                    Owner = props.TryGetProperty("hubspot_owner_id", out var owner) ? owner.GetString() : ""
+                    Type = "company",
+                    Id = item.GetProperty("id").GetString(),
+                    Name = props.GetProperty("name").GetString(),
+                    Domain = props.GetProperty("domain").GetString()
                 });
             }
 
             return list;
         }
 
-     
+        // ---------------- DEALS ----------------
+
+        public async Task<string> CreateDealAsync(StandardDealDto deal, string userId)
+        {
+            var token = await GetToken(userId);
+
+            var req = new HttpRequestMessage(
+                HttpMethod.Post,
+                "https://api.hubapi.com/crm/v3/objects/deals")
+            {
+                Content = JsonContent.Create(new
+                {
+                    properties = new
+                    {
+                        dealname = deal.DealName,
+                        dealstage = deal.Stage ?? "appointmentscheduled",
+                        amount = deal.Amount
+                    }
+                })
+            };
+
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+            var res = await _client.SendAsync(req);
+            res.EnsureSuccessStatusCode();
+
+            var result = await res.Content.ReadFromJsonAsync<Dictionary<string, object>>();
+            return result?["id"]?.ToString();
+        }
+
+        public async Task<string> UpdateDealAsync(StandardDealDto deal, string userId)
+        {
+            var token = await GetToken(userId);
+
+            var req = new HttpRequestMessage(
+                HttpMethod.Patch,
+                $"https://api.hubapi.com/crm/v3/objects/deals/{deal.Id}")
+            {
+                Content = JsonContent.Create(new
+                {
+                    properties = new
+                    {
+                        dealname = deal.DealName,
+                        dealstage = deal.Stage,
+                        amount = deal.Amount
+                    }
+                })
+            };
+
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+            var res = await _client.SendAsync(req);
+            res.EnsureSuccessStatusCode();
+
+            return deal.Id;
+        }
+
         public async Task<List<StandardDealDto>> GetDealsAsync(string userId)
         {
-            var connection = await _db.OAuthConnections
-                .FirstOrDefaultAsync(x => x.UserId == userId && x.Crm == CrmType.HubSpot);
+            var token = await GetToken(userId);
 
-            if (connection == null)
-                throw new Exception("HubSpot is not connected for this user.");
+            var req = new HttpRequestMessage(
+                HttpMethod.Post,
+                "https://api.hubapi.com/crm/v3/objects/deals/search")
+            {
+                Content = JsonContent.Create(new
+                {
+                    limit = 10,
+                    sorts = new[]
+                    {
+                        new { propertyName = "createdAt", direction = "DESCENDING" }
+                    },
+                    properties = new[] { "dealname", "dealstage", "amount" }
+                })
+            };
 
-            _client.DefaultRequestHeaders.Authorization =
-                new AuthenticationHeaderValue("Bearer", connection.AccessToken);
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
-            string url =
-                "https://api.hubapi.com/crm/v3/objects/deals" +
-                "?limit=10" +
-                "&properties=dealname,dealstage,amount,pipeline,hubspot_owner_id";
+            var res = await _client.SendAsync(req);
+            res.EnsureSuccessStatusCode();
 
-            var response = await _client.GetAsync(url);
-            response.EnsureSuccessStatusCode();
-
-            var json = await response.Content.ReadAsStringAsync();
-
+            var json = await res.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement.GetProperty("results");
 
             var list = new List<StandardDealDto>();
 
-            foreach (var item in root.EnumerateArray())
+            foreach (var item in doc.RootElement.GetProperty("results").EnumerateArray())
             {
-                var id = item.GetProperty("id").GetString();
                 var props = item.GetProperty("properties");
 
-                decimal? amount = null;
-                if (props.TryGetProperty("amount", out var amElement))
-                {
-                    var amStr = amElement.GetString();
-                    if (!string.IsNullOrWhiteSpace(amStr) &&
-                        decimal.TryParse(amStr, out var parsed))
-                    {
-                        amount = parsed;
-                    }
-                }
+                decimal.TryParse(props.GetProperty("amount").GetString(), out var amt);
 
                 list.Add(new StandardDealDto
                 {
                     Crm = "hubspot",
-                    Id = id,
-                    DealName = props.TryGetProperty("dealname", out var dn) ? dn.GetString() : "",
-                    Stage = props.TryGetProperty("dealstage", out var st) ? st.GetString() : "",
-                    Amount = amount,
-                    Pipeline = props.TryGetProperty("pipeline", out var pl) ? pl.GetString() : "",
-                    Owner = props.TryGetProperty("hubspot_owner_id", out var ow) ? ow.GetString() : ""
+                    Type = "deal",
+                    Id = item.GetProperty("id").GetString(),
+                    DealName = props.GetProperty("dealname").GetString(),
+                    Stage = props.GetProperty("dealstage").GetString(),
+                    Amount = amt
                 });
             }
 
             return list;
         }
-       
-        public async Task<string> CreateCompanyAsync(StandardCompanyDto company, string userId)
-        {
-            if (company == null) throw new ArgumentNullException(nameof(company));
-
-            var connection = await _db.OAuthConnections
-                .FirstOrDefaultAsync(x => x.UserId == userId && x.Crm == CrmType.HubSpot);
-
-            if (connection == null)
-                throw new InvalidOperationException("No HubSpot connection found for user " + userId);
-
-            var url = "https://api.hubapi.com/crm/v3/objects/companies";
-
-            var payload = new
-            {
-                properties = new Dictionary<string, object?>
-                {
-                    ["name"] = company.Name,
-                    ["domain"] = company.Domain
-                 
-                }
-            };
-
-            var request = new HttpRequestMessage(HttpMethod.Post, url)
-            {
-                Content = JsonContent.Create(payload)
-            };
-
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", connection.AccessToken);
-
-            var response = await _client.SendAsync(request);
-            response.EnsureSuccessStatusCode();
-
-            var result = await response.Content.ReadFromJsonAsync<Dictionary<string, object>>();
-            return result != null && result.TryGetValue("id", out var idObj) ? idObj?.ToString() : null;
-        }
-
-    
-        public async Task<string> CreateDealAsync(StandardDealDto deal, string userId)
-        {
-            if (deal == null) throw new ArgumentNullException(nameof(deal));
-
-            var connection = await _db.OAuthConnections
-                .FirstOrDefaultAsync(x => x.UserId == userId && x.Crm == CrmType.HubSpot);
-
-            if (connection == null)
-                throw new InvalidOperationException("No HubSpot connection found for user " + userId);
-
-            var url = "https://api.hubapi.com/crm/v3/objects/deals";
-
-            
-            var properties = new Dictionary<string, object?>()
-            {
-                ["dealname"] = deal.DealName,
-                ["dealstage"] = deal.Stage,
-                ["pipeline"] = deal.Pipeline
-            };
-
-            if (deal.Amount.HasValue)
-                properties["amount"] = deal.Amount.Value;
-
-            var payload = new
-            {
-                properties = properties,
-                
-            };
-
-            var request = new HttpRequestMessage(HttpMethod.Post, url)
-            {
-                Content = JsonContent.Create(payload)
-            };
-
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", connection.AccessToken);
-
-            var response = await _client.SendAsync(request);
-            response.EnsureSuccessStatusCode();
-
-            var result = await response.Content.ReadFromJsonAsync<Dictionary<string, object>>();
-            return result != null && result.TryGetValue("id", out var idObj) ? idObj?.ToString() : null;
-        }
-
     }
 }

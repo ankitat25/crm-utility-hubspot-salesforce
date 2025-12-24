@@ -13,11 +13,10 @@ namespace CrmUtility.Backend.Services
     {
         public string access_token { get; set; }
         public string instance_url { get; set; }
-        public string id { get; set; }
+        public string refresh_token { get; set; }
         public string token_type { get; set; }
         public string issued_at { get; set; }
         public string signature { get; set; }
-        public string refresh_token { get; set; }
     }
 
     public class SalesforceAuthService
@@ -36,47 +35,85 @@ namespace CrmUtility.Backend.Services
             _options = options.Value;
         }
 
+
         public string GetLoginUrl(string state)
         {
-            var url =
+            return
                 "https://login.salesforce.com/services/oauth2/authorize" +
                 $"?response_type=code" +
                 $"&client_id={_options.ClientId}" +
                 $"&redirect_uri={Uri.EscapeDataString(_options.RedirectUri)}" +
                 $"&state={Uri.EscapeDataString(state)}";
-
-            return url;
         }
+
+
 
         public async Task<OAuthConnection> ExchangeCodeAsync(string code, string userId)
         {
-            var data = new Dictionary<string, string>
+            var form = new Dictionary<string, string>
             {
                 ["grant_type"] = "authorization_code",
-                ["code"] = code,
                 ["client_id"] = _options.ClientId,
                 ["client_secret"] = _options.ClientSecret,
-                ["redirect_uri"] = _options.RedirectUri
+                ["redirect_uri"] = _options.RedirectUri,
+                ["code"] = code
             };
 
-            var content = new FormUrlEncodedContent(data);
+            var res = await _client.PostAsync(
+                "https://login.salesforce.com/services/oauth2/token",
+                new FormUrlEncodedContent(form));
 
-            var response = await _client.PostAsync("https://login.salesforce.com/services/oauth2/token", content);
-            response.EnsureSuccessStatusCode();
+            res.EnsureSuccessStatusCode();
 
-            var tokenData = await response.Content.ReadFromJsonAsync<SalesforceTokenResponse>();
+            var token = await res.Content.ReadFromJsonAsync<SalesforceTokenResponse>();
 
-            var connection = new OAuthConnection
+            var conn = new OAuthConnection
             {
                 UserId = userId,
                 Crm = CrmType.Salesforce,
-                AccessToken = tokenData.access_token,
-                RefreshToken = tokenData.refresh_token,
+                AccessToken = token.access_token,
+                RefreshToken = token.refresh_token,
+                InstanceUrl = token.instance_url,
                 ExpiresAtUtc = DateTime.UtcNow.AddHours(2),
-                InstanceUrl = tokenData.instance_url
+                UpdatedAtUtc = DateTime.UtcNow
             };
 
-            return await _tokenService.UpsertConnectionAsync(connection);
+
+            return await _tokenService.UpsertConnectionAsync(conn);
+        }
+
+        public async Task<string> EnsureAccessTokenAsync(string userId)
+        {
+            var conn = await _tokenService.GetConnectionAsync(userId, CrmType.Salesforce);
+            if (conn == null)
+                throw new Exception("Salesforce not connected");
+
+            if (conn.ExpiresAtUtc > DateTime.UtcNow.AddMinutes(2))
+                return conn.AccessToken;
+
+            var form = new Dictionary<string, string>
+            {
+                ["grant_type"] = "refresh_token",
+                ["refresh_token"] = conn.RefreshToken,
+                ["client_id"] = _options.ClientId,
+                ["client_secret"] = _options.ClientSecret
+            };
+
+            var res = await _client.PostAsync(
+                "https://login.salesforce.com/services/oauth2/token",
+                new FormUrlEncodedContent(form));
+
+            res.EnsureSuccessStatusCode();
+
+            var token = await res.Content.ReadFromJsonAsync<SalesforceTokenResponse>();
+
+            conn.AccessToken = token.access_token;
+            conn.InstanceUrl = token.instance_url;
+            conn.ExpiresAtUtc = DateTime.UtcNow.AddHours(2);
+
+            await _tokenService.UpsertConnectionAsync(conn);
+
+            return conn.AccessToken;
         }
     }
 }

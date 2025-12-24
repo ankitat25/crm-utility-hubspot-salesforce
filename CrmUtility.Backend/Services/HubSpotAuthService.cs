@@ -1,6 +1,11 @@
-﻿using CrmUtility.Backend.Models;
-using Microsoft.Extensions.Options;
+﻿using System;
+using System.Collections.Generic;
+using System.Net.Http;
+using System.Net.Http.Json;
+using System.Threading.Tasks;
+using CrmUtility.Backend.Models;
 using CrmUtility.Backend.Options;
+using Microsoft.Extensions.Options;
 
 namespace CrmUtility.Backend.Services
 {
@@ -28,20 +33,17 @@ namespace CrmUtility.Backend.Services
             _options = options.Value;
         }
 
-        // STEP A: Generate HubSpot login URL
+     
         public string GetLoginUrl(string state)
         {
-            var url =
+            return
                 $"https://app.hubspot.com/oauth/authorize" +
                 $"?client_id={_options.ClientId}" +
-                $"&redirect_uri={Uri.EscapeDataString(_options.RedirectUri)}" +
                 $"&scope={Uri.EscapeDataString(_options.Scopes)}" +
+                $"&redirect_uri={Uri.EscapeDataString(_options.RedirectUri)}" +
                 $"&state={state}";
-
-            return url;
         }
 
-        // STEP B: Exchange code for tokens
         public async Task<OAuthConnection> ExchangeCodeAsync(string code, string userId)
         {
             var data = new Dictionary<string, string>
@@ -53,24 +55,64 @@ namespace CrmUtility.Backend.Services
                 ["code"] = code
             };
 
-            var content = new FormUrlEncodedContent(data);
+            var res = await _client.PostAsync(
+                "https://api.hubapi.com/oauth/v1/token",
+                new FormUrlEncodedContent(data));
 
-            var response = await _client.PostAsync("https://api.hubapi.com/oauth/v1/token", content);
-            response.EnsureSuccessStatusCode();
+            res.EnsureSuccessStatusCode();
 
-            var tokenData = await response.Content.ReadFromJsonAsync<HubSpotTokenResponse>();
+            var token = await res.Content.ReadFromJsonAsync<HubSpotTokenResponse>();
 
-            // Save to DB
-            var connection = new OAuthConnection
+            if (token == null)
+                throw new Exception("Invalid HubSpot token response");
+
+            var conn = new OAuthConnection
             {
                 UserId = userId,
                 Crm = CrmType.HubSpot,
-                AccessToken = tokenData.access_token,
-                RefreshToken = tokenData.refresh_token,
-                ExpiresAtUtc = DateTime.UtcNow.AddSeconds(tokenData.expires_in)
+                AccessToken = token.access_token,
+                RefreshToken = token.refresh_token,
+                ExpiresAtUtc = DateTime.UtcNow.AddSeconds(token.expires_in),
+                UpdatedAtUtc = DateTime.UtcNow
             };
 
-            return await _tokenService.UpsertConnectionAsync(connection);
+            return await _tokenService.UpsertConnectionAsync(conn);
+        }
+
+        public async Task<string> EnsureAccessTokenAsync(string userId)
+        {
+            var conn = await _tokenService.GetConnectionAsync(userId, CrmType.HubSpot);
+            if (conn == null)
+                throw new Exception("HubSpot not connected");
+
+            
+            if (conn.ExpiresAtUtc > DateTime.UtcNow.AddMinutes(2))
+                return conn.AccessToken;
+
+            
+            var data = new Dictionary<string, string>
+            {
+                ["grant_type"] = "refresh_token",
+                ["refresh_token"] = conn.RefreshToken,
+                ["client_id"] = _options.ClientId,
+                ["client_secret"] = _options.ClientSecret
+            };
+
+            var res = await _client.PostAsync(
+                "https://api.hubapi.com/oauth/v1/token",
+                new FormUrlEncodedContent(data));
+
+            res.EnsureSuccessStatusCode();
+
+            var token = await res.Content.ReadFromJsonAsync<HubSpotTokenResponse>();
+
+            conn.AccessToken = token.access_token;
+            conn.ExpiresAtUtc = DateTime.UtcNow.AddSeconds(token.expires_in);
+            conn.UpdatedAtUtc = DateTime.UtcNow;
+
+            await _tokenService.UpsertConnectionAsync(conn);
+
+            return conn.AccessToken;
         }
     }
 }
